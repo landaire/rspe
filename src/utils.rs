@@ -1,8 +1,3 @@
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
-
 /// This function converts a mutable u8 array to a String.
 /// It iterates through the array and appends each character to a new String.
 /// If it encounters a null character, it returns the String.
@@ -15,30 +10,12 @@ use alloc::{
 ///
 /// A String representing the converted array.
 #[allow(unused)]
-pub fn get_string_fromu8_array(arr: &mut [u8]) -> String {
-    arr.iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as char)
-        .collect()
-}
-
-/// This function converts a mutable i8 array to a String.
-/// It iterates through the array and appends each character to a new String.
-/// If it encounters a null character, it returns the String.
-///
-/// # Arguments
-///
-/// * `arr` - A mutable slice of i8 representing the array to convert.
-///
-/// # Returns
-///
-/// A String representing the converted array.
-#[allow(unused)]
-pub fn get_string_fromi8_array(arr: &mut [i8]) -> String {
-    arr.iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8 as char)
-        .collect()
+pub fn get_string_fromu8_array(arr: &mut [u8]) -> &str {
+    if let Some(null_term_offset) = arr.iter().position(|c| *c == 0) {
+        return unsafe { core::str::from_utf8_unchecked(&arr[0..null_term_offset]) };
+    } else {
+        ""
+    }
 }
 
 /// Reads a string from memory.
@@ -50,31 +27,19 @@ pub fn get_string_fromi8_array(arr: &mut [i8]) -> String {
 /// # Returns
 ///
 /// A string containing the characters read from memory.
-pub fn read_string_from_memory(baseaddress: *const u8) -> String {
-    // Create a vector of 100 u8s
-    let mut temp: Vec<u8> = alloc::vec![0; 100];
+pub fn read_string_from_memory<'a>(baseaddress: *const u8) -> &'a str {
+    // Find the null terminator
+    let mut count = 0;
+    loop {
+        let byte_at_offset = unsafe { *baseaddress.offset(count) };
+        if byte_at_offset == 0 {
+            let bytes = unsafe { core::slice::from_raw_parts(baseaddress, count as usize) };
 
-    // Iterate through the memory at the given address
-    let mut i = 0;
-    while i < temp.capacity() {
-        // Copy the memory at the current address to the vector
-        let _res = unsafe {
-            core::ptr::copy_nonoverlapping(
-                (baseaddress as usize + i) as *const u8,
-                (temp.as_mut_ptr() as usize + i as usize) as *mut u8,
-                1,
-            )
-        };
-
-        // If the current byte is 0, we've reached the end of the string
-        if temp[i as usize] == 0 {
-            break;
+            // yolo
+            return unsafe { core::str::from_utf8_unchecked(bytes) };
         }
-        i += 1;
+        count += 1;
     }
-
-    // Convert the vector to a String and return it
-    String::from_utf8_lossy(&temp).to_string()
 }
 
 /// This function checks if a given PE file contains the .NET PE flag.
@@ -88,7 +53,7 @@ pub fn read_string_from_memory(baseaddress: *const u8) -> String {
 /// # Returns
 ///
 /// A boolean value indicating whether the PE file contains the .NET flag.
-pub fn check_dotnet(pe: Vec<u8>) -> bool {
+pub fn check_dotnet(pe: &[u8]) -> bool {
     const DOTNET_FLAG: [u8; 13] = [
         0x2E, 0x4E, 0x45, 0x54, 0x46, 0x72, 0x61, 0x6D, 0x65, 0x77, 0x6F, 0x72, 0x6B,
     ];

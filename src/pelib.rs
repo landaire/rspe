@@ -1,11 +1,9 @@
 use core::ffi::c_void;
 
-use alloc::vec::Vec;
-
 use crate::windows::{
-    GetProcAddress, LoadLibraryA, IMAGE_BASE_RELOCATION, IMAGE_DIRECTORY_ENTRY_BASERELOC,
-    IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DOS_HEADER, IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE,
-    IMAGE_SECTION_HEADER,
+    GetModuleHandleAFn, GetProcAddressFn, LoadLibraryAFn, IMAGE_BASE_RELOCATION,
+    IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DOS_HEADER,
+    IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE, IMAGE_SECTION_HEADER,
 };
 
 /// Function to get the size of the headers
@@ -195,14 +193,14 @@ fn get_number_of_sections(ntheader: *const c_void) -> u16 {
 pub fn write_sections(
     // A handle to the process into which the PE file will be loaded.
     // A pointer to the base address of the allocated memory in the target process.
-    baseptr: *const c_void,
+    baseptr: *mut c_void,
     // A vector containing the bytes of the PE file to be loaded.
-    buffer: Vec<u8>,
+    buffer: &[u8],
     // A pointer to the NT header of the PE file.
     ntheader: *const c_void,
     // A pointer to the DOS header of the PE file.
     dosheader: *const IMAGE_DOS_HEADER,
-) {
+) -> (*mut c_void, usize) {
     let number_of_sections = get_number_of_sections(ntheader);
     let nt_header_size = get_nt_header_size();
 
@@ -210,31 +208,30 @@ pub fn write_sections(
     let mut st_section_header =
         (baseptr as usize + e_lfanew + nt_header_size) as *const IMAGE_SECTION_HEADER;
 
+    let mut text_info = None;
     for _i in 0..number_of_sections {
+        let header_ref: &IMAGE_SECTION_HEADER = unsafe { core::mem::transmute(st_section_header) };
+        let dest = unsafe { baseptr.offset(header_ref.VirtualAddress as isize) };
+        let len = header_ref.SizeOfRawData as usize;
+
+        if &header_ref.Name == b".text\0\0\0" {
+            text_info = Some((dest, len));
+        }
+
         // Get the section data
         let section_data = buffer
-            .get(
-                unsafe { (*st_section_header).PointerToRawData } as usize..(unsafe {
-                    (*st_section_header).PointerToRawData
-                } + (unsafe {
-                    *st_section_header
-                })
-                .SizeOfRawData)
-                    as usize,
-            )
+            .get(header_ref.PointerToRawData as usize..(header_ref.PointerToRawData as usize + len))
             .unwrap_or_default();
 
         // Write the section data to the allocated memory
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                section_data.as_ptr() as *const c_void,
-                (baseptr as usize + (*st_section_header).VirtualAddress as usize) as *mut c_void,
-                (*st_section_header).SizeOfRawData as usize,
-            )
+            core::ptr::copy_nonoverlapping(section_data.as_ptr() as *const c_void, dest, len)
         };
 
         st_section_header = unsafe { st_section_header.add(1) };
     }
+
+    text_info.expect("did not encounter a .text section")
 }
 
 /// This function fixes the base relocations of the PE file in the allocated memory in the target process.
@@ -289,7 +286,7 @@ pub fn fix_base_relocations(
             let temp = unsafe { *relocoffset_ptr };
 
             // Check if the relocation type is not absolute
-            if temp as u32 >> 12 as u32 != crate::windows::IMAGE_REL_BASED_ABSOLUTE {
+            if temp as u32 >> 12 as u32 != crate::windows::IMAGE_REL_BASED_ABSOLUTE as u32 {
                 // Calculate the final address of the relocation
                 let finaladdress = baseptr as usize
                     + unsafe { (*relocptr).VirtualAddress } as usize
@@ -347,11 +344,14 @@ fn get_import_directory(ntheader: *const c_void) -> crate::windows::IMAGE_DATA_D
 ///
 /// * `baseptr` - A pointer to the base address of the allocated memory in the target process.
 /// * `ntheader` - A pointer to the NT header of the PE file.
-pub fn write_import_table(
+fn write_import_table_impl(
     // A pointer to the base address of the allocated memory in the target process.
     baseptr: *const c_void,
     // A pointer to the NT header of the PE file.
     ntheader: *const c_void,
+    get_proc_address_fn: GetProcAddressFn,
+    load_library_fn: LoadLibraryAFn,
+    get_module_handle_fn: GetModuleHandleAFn,
 ) {
     // Get the import directory
     let import_dir = get_import_directory(ntheader);
@@ -383,8 +383,12 @@ pub fn write_import_table(
             (baseptr as usize + import.Name as usize) as *const u8,
         );
 
-        // Load the DLL
-        let dllhandle = unsafe { LoadLibraryA(dllname.as_bytes().as_ptr() as *const u8) };
+        let dllhandle = unsafe { (load_library_fn)(dllname.as_bytes().as_ptr() as *const u8) };
+        let dllhandle = if dllhandle.is_null() || dllhandle == usize::MAX as *mut c_void {
+            unsafe { (get_module_handle_fn)(dllname.as_bytes().as_ptr() as *const _) }
+        } else {
+            dllhandle
+        };
 
         // Get the pointer to the first thunk for this import descriptor
         let mut thunkptr = unsafe {
@@ -417,9 +421,10 @@ pub fn write_import_table(
             );
 
             // If the function name is not empty, replace the function address with the address of the function in the DLL
-            if !funcname.is_empty() {
-                let funcaddress =
-                    unsafe { GetProcAddress(dllhandle, funcname.as_bytes().as_ptr() as *const u8) };
+            if !funcname.len() > 1 {
+                let funcaddress = unsafe {
+                    (get_proc_address_fn)(dllhandle, funcname.as_bytes().as_ptr() as *const u8)
+                };
                 let funcaddress_ptr = (baseptr as usize
                     + import.FirstThunk as usize
                     + i * core::mem::size_of::<usize>())
@@ -432,4 +437,28 @@ pub fn write_import_table(
         }
         ogfirstthunkptr += core::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>();
     }
+}
+
+/// Writes the import table of the PE file to the allocated memory in the target process.
+///
+/// # Arguments
+///
+/// * `baseptr` - A pointer to the base address of the allocated memory in the target process.
+/// * `ntheader` - A pointer to the NT header of the PE file.
+pub fn write_import_table(
+    // A pointer to the base address of the allocated memory in the target process.
+    baseptr: *const c_void,
+    // A pointer to the NT header of the PE file.
+    ntheader: *const c_void,
+    get_proc_address_func: GetProcAddressFn,
+    load_library_fn: LoadLibraryAFn,
+    get_module_handle_fn: GetModuleHandleAFn,
+) {
+    write_import_table_impl(
+        baseptr,
+        ntheader,
+        get_proc_address_func,
+        load_library_fn,
+        get_module_handle_fn,
+    )
 }
