@@ -37,6 +37,8 @@ use core::{ffi::c_void, ptr};
 #[used]
 #[no_mangle]
 #[cfg(feature = "shellcode_compat")]
+// Required because compiler_builtins expects this symbol to be present
+// and they only define it for UEFI environments
 pub static _fltused: i32 = 0;
 
 /// Compares the platform of the imported Portable Executable (PE) file with the platform of the compiled binary.

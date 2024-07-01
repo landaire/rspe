@@ -10,10 +10,10 @@ repository = "https://github.com/Thoxy67/rspe/"
 documentation = "https://docs.rs/rspe"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-compiler_builtins = { git = "https://github.com/rust-lang/compiler-builtins", default-features = false, features = [
-    "mem",
-] }
+[dependencies.compiler_builtins]
+git = "https://github.com/rust-lang/compiler-builtins"
+default-features = false
+features = ["mem"]
 
 [features]
 shellcode_compat = []

@@ -3,7 +3,7 @@ use core::ffi::c_void;
 use crate::windows::{
     GetModuleHandleAFn, GetProcAddressFn, LoadLibraryAFn, IMAGE_BASE_RELOCATION,
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DOS_HEADER,
-    IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE, IMAGE_SECTION_HEADER,
+    IMAGE_IMPORT_DESCRIPTOR, IMAGE_NT_SIGNATURE, IMAGE_ORDINAL_FLAG, IMAGE_SECTION_HEADER,
 };
 
 /// Function to get the size of the headers
@@ -415,22 +415,41 @@ fn write_import_table_impl(
             // Get the offset of the function name
             let offset = usize::from_ne_bytes(thunkdata);
 
-            // Get the function name
-            let funcname = crate::utils::read_string_from_memory(
-                (baseptr as usize + offset as usize + 2) as *const u8,
-            );
-
-            // If the function name is not empty, replace the function address with the address of the function in the DLL
-            if !funcname.len() > 1 {
-                let funcaddress = unsafe {
-                    (get_proc_address_fn)(dllhandle, funcname.as_bytes().as_ptr() as *const u8)
+            // Check if this is imported by ordinal
+            let func_addr = if offset & IMAGE_ORDINAL_FLAG != 0 {
+                let val = unsafe {
+                    (get_proc_address_fn)(
+                        dllhandle,
+                        (offset & (IMAGE_ORDINAL_FLAG - 1)) as *const u8,
+                    )
                 };
+
+                // Putting this into two separate expressions is a little cleaner
+                // and allows us to insert an int3 after the function if we want.
+                Some(val)
+            } else {
+                // Get the function name
+                let funcname = crate::utils::read_string_from_memory(
+                    (baseptr as usize + offset as usize + 2) as *const u8,
+                );
+
+                // If the function name is not empty, replace the function address with the address of the function in the DLL
+                if !funcname.len() > 1 {
+                    Some(unsafe {
+                        (get_proc_address_fn)(dllhandle, funcname.as_bytes().as_ptr() as *const u8)
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(func_addr) = func_addr {
                 let funcaddress_ptr = (baseptr as usize
                     + import.FirstThunk as usize
                     + i * core::mem::size_of::<usize>())
                     as *mut usize;
-                unsafe { core::ptr::write(funcaddress_ptr, funcaddress as usize) };
+                unsafe { core::ptr::write(funcaddress_ptr, func_addr as usize) };
             }
+
             i += 1;
             // Move to the next thunk
             thunkptr += core::mem::size_of::<usize>();
